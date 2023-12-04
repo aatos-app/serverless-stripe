@@ -7,12 +7,21 @@ export interface WebhookConfig {
   webhookSecretEnvVariableName: string;
 }
 
+export interface StripeProductConfig {
+  name: string;
+  internal: {
+    id: string;
+    description: string;
+  }
+}
+
 type Value<T> = T[keyof T];
 export type WebhookFunction = Value<AWS["functions"]>;
 
 export interface StripeConfig {
   apiKey: string;
   webhooks: WebhookConfig[];
+  products: StripeProductConfig[];
 }
 
 export interface Tags {
@@ -24,25 +33,18 @@ export interface CustomDomain {
   basePath: string;
 }
 
+type Provider = AWS["functions"] & {
+  custom:{
+    customDomain?: CustomDomain;
+    stripe?: StripeConfig;
+  }
+}
+
 export interface ServerlessInstance {
   service: {
     functions: AWS["functions"];
     service: string;
-    provider: {
-      stage: string;
-      region?: string;
-      profile?: string;
-      stackName: string;
-      compiledCloudFormationTemplate: {
-        Outputs: any;
-      };
-      apiGateway: {
-        restApiId: any;
-        websocketApiId: any;
-      };
-      tags: Tags;
-      stackTags: Tags;
-    };
+    provider: Provider;
     custom: {
       customDomain?: CustomDomain;
       stripe?: StripeConfig;
@@ -52,6 +54,10 @@ export interface ServerlessInstance {
     aws: {
       getCredentials();
     };
+  };
+  processedInput: {
+    commands: string[];
+    options: ServerlessOptions;
   };
   cli: {
     log(str: string, entity?: string);

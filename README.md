@@ -3,7 +3,7 @@ Plugin for Serverless Framework to automatically create Stripe webhooks and bind
 
 In short:
 1. Install serverless-domain-manager plugin and configure it
-2. Create a stripe api key (permissions needed for managing webhooks)
+2. Create a stripe api key (permissions needed for managing webhooks and products)
 3. edit your serverless configuration
     ```
       custom: {
@@ -23,8 +23,18 @@ In short:
           // not these are serverless-domain-manager configs but are also used in this plugin
           domainName: "mydomain.com",
           basePath: "my-api",
-        }
+        },
+        products: [
+          {
+            name: 'Subscription',
+            internal: {
+              id: 'subscription_de',
+              description: 'Subscription product for Germany',
+            },
+          },
+        ],
       },
     ```
 4. Create the `webhookHandler` function, the stripe webhooke endpoint secret will be available under `process.env.stripeWebhookSecret` (or whichever you've configured in `webhookSecretEnvVariableName`)
-5. Deploy
+5. If you added any products, the gnerated stripe product id will be availabe under environment vars using the internal id (e.g. process.environment["subscription_de"] in this example)
+6. Deploy
