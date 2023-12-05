@@ -7,12 +7,21 @@ export interface WebhookConfig {
   webhookSecretEnvVariableName: string;
 }
 
+export type StripePriceConfig = {
+  id: string;
+  price: number;
+  currency: string;
+  interval: "month" | "year";
+  countryCode: string;
+}
+
 export interface StripeProductConfig {
   name: string;
   internal: {
     id: string;
     description: string;
-  }
+  },
+  prices: StripePriceConfig[];
 }
 
 type Value<T> = T[keyof T];

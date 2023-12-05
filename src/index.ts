@@ -9,6 +9,7 @@ import {
   CustomDomain,
   WebhookFunction,
   StripeProductConfig,
+  StripePriceConfig,
 } from "./types";
 import Logging from "./logging";
 import { Stripe } from "stripe";
@@ -26,7 +27,7 @@ type ProductMetadata = {
   internalId: string;
 } & MetadataBase;
 
-class ServerlessCustomDomain {
+class ServerlessStripe {
   // Serverless specific properties
   public serverless: ServerlessInstance;
   public options: ServerlessOptions;
@@ -46,8 +47,10 @@ class ServerlessCustomDomain {
     lambda: string;
   }[] = [];
 
-  private stripeProducts: Stripe.Product[] = [];
-
+  private stripeProducts: {
+    product: Stripe.Product;
+    prices: Stripe.Price[];
+  }[] = [];
 
   private customDomain: CustomDomain;
 
@@ -71,7 +74,7 @@ class ServerlessCustomDomain {
         this,
         this.validateConfigExists
       ),
-      "before:package:compileFunctions": this.hookWrapper.bind(
+      "before:package:setupProviderConfiguration": this.hookWrapper.bind(
         this,
         this.createStripeWebhooksAndProducts
       ),
@@ -105,9 +108,7 @@ class ServerlessCustomDomain {
    */
   public validateConfigExists(): void {
     if (!this.stage) {
-      throw new Error(
-        `${Globals.pluginName}: Stage is required.`
-      );
+      throw new Error(`${Globals.pluginName}: Stage is required.`);
     }
     this.customDomain = this.serverless.service.custom.customDomain;
     if (!this.customDomain) {
@@ -165,8 +166,27 @@ class ServerlessCustomDomain {
       const regex = /^[a-zA-Z]([a-zA-Z0-9_])+$/;
       if (!regex.test(product.internal.id)) {
         throw new Error(
-          `Product internal.id ${product.internal.id} does not match regex ${regex.toString()}`
+          `Product internal.id ${
+            product.internal.id
+          } does not match regex ${regex.toString()}`
         );
+      }
+      for (const price of product.prices) {
+        if (!price.id) {
+          throw new Error("Price id is required");
+        }
+        if (!price.price) {
+          throw new Error("Price price is required");
+        }
+        if (!price.currency) {
+          throw new Error("Price currency is required");
+        }
+        if (!price.interval) {
+          throw new Error("Price interval is required");
+        }
+        if (!price.countryCode) {
+          throw new Error("Price countryCode is required");
+        }
       }
     }
     // dont allow duplicate internal ids
@@ -182,23 +202,39 @@ class ServerlessCustomDomain {
     const NEWLINE = `\n${TAB}`;
     const webhookListCreated = this.webhooksCreated.map((webhook) => {
       const metadata = webhook.metadata || {};
-      return `CREATE${NEWLINE}webhookId:${NEWLINE}${TAB}${
-        webhook.id
-      }${NEWLINE}lambda:${NEWLINE}${TAB}${
-        metadata.lambda
-      }${NEWLINE}url:${NEWLINE}${TAB}${
-        webhook.url
-      }${NEWLINE}events:${NEWLINE}${TAB}${webhook.enabled_events.join(
-        `${NEWLINE}${TAB}`
-      )}${NEWLINE}`;
+      return (
+        `CREATE${NEWLINE}` +
+        `webhookId:${NEWLINE}${TAB}${webhook.id}${NEWLINE}` +
+        `lambda:${NEWLINE}${TAB}${metadata.lambda}${NEWLINE}` +
+        `url:${NEWLINE}${TAB}${webhook.url}${NEWLINE}` +
+        `events:${NEWLINE}${TAB}${webhook.enabled_events.join(
+          `${NEWLINE}${TAB}`
+        )}${NEWLINE}`
+      );
     });
 
     const webhookListDeleted = this.webhooksDeleted.map((webhook) => {
-      return `DELETE${NEWLINE}webhookId:${NEWLINE}${TAB}${webhook.webhookId}${NEWLINE}lambda:${NEWLINE}${TAB}${webhook.lambda}${NEWLINE}url:${NEWLINE}${TAB}${webhook.url}${NEWLINE}`;
+      return (
+        `DELETE${NEWLINE}` +
+        `webhookId:${NEWLINE}${TAB}${webhook.webhookId}${NEWLINE}` +
+        `lambda:${NEWLINE}${TAB}${webhook.lambda}${NEWLINE}` +
+        `url:${NEWLINE}${TAB}${webhook.url}${NEWLINE}`
+      );
     });
 
-    const activeProducts = this.stripeProducts.map((product) => {
-      return `PRODUCT${NEWLINE}productId:${NEWLINE}${TAB}${product.id}${NEWLINE}name:${NEWLINE}${TAB}${product.name}${NEWLINE}internalId:${NEWLINE}${TAB}${product.metadata.internalId}${NEWLINE}`;
+    const activeProducts = this.stripeProducts.map((productEntry) => {
+      return (
+        `PRODUCT${NEWLINE}` +
+        `productId:${NEWLINE}${TAB}${productEntry.product.id}${NEWLINE}` +
+        `name:${NEWLINE}${TAB}${productEntry.product.name}${NEWLINE}` +
+        `internalId:${NEWLINE}${TAB}${productEntry.product.metadata.internalId}${NEWLINE}` +
+        `prices:${NEWLINE}${TAB}${productEntry.prices
+          .map(
+            (price) =>
+              `${price.id}${NEWLINE}${TAB}${TAB}country:${price.metadata.country}${NEWLINE}${TAB}${TAB}price:${price.unit_amount}${NEWLINE}${TAB}${TAB}currency:${price.currency}${NEWLINE}${TAB}${TAB}interval:${price.recurring?.interval}`
+          )
+          .join(`${NEWLINE}${TAB}`)}`
+      );
     });
     Globals.serverless.addServiceOutputSection(Globals.pluginName, [
       ...webhookListCreated,
@@ -218,7 +254,6 @@ class ServerlessCustomDomain {
     );
   }
 
-
   private async getWebhooksFromStripe(): Promise<Stripe.WebhookEndpoint[]> {
     const webhooks = await this.getStripe().webhookEndpoints.list();
     return webhooks.data.filter((hook) =>
@@ -228,7 +263,9 @@ class ServerlessCustomDomain {
 
   private async getProductsFromStripe(): Promise<Stripe.Product[]> {
     const products = await this.getStripe().products.list();
-    return products.data.filter((product) => this.isStripeEntityManagedByThisStack(product));
+    return products.data.filter((product) =>
+      this.isStripeEntityManagedByThisStack(product)
+    );
   }
 
   public async removeStripeWebhooks() {
@@ -296,13 +333,28 @@ class ServerlessCustomDomain {
     await this.createStripeProducts();
   }
 
+  private findMatchingPrice(
+    priceConfig: StripePriceConfig,
+    prices: Stripe.Price[]
+  ) {
+    return prices.find(
+      (price) =>
+        price.metadata.stage === this.stage &&
+        price.metadata.service === this.serverless.service.service &&
+        price.metadata.managedBy === Globals.pluginName &&
+        price.metadata.country === priceConfig.countryCode &&
+        price.unit_amount === priceConfig.price &&
+        price.currency === priceConfig.currency &&
+        price.recurring?.interval === priceConfig.interval
+    );
+  }
+
   private async createStripeProducts() {
     if (this.products.length === 0) {
       return;
     }
     const productsBefore = await this.getProductsFromStripe();
     for (const productConfig of this.products) {
-
       let product = productsBefore.find(
         (hook) => hook.metadata.internalId === productConfig.internal.id
       );
@@ -327,9 +379,45 @@ class ServerlessCustomDomain {
         );
         Logging.logInfo(`Updated webhook ${product.id}`);
       }
-      this.stripeProducts.push(product);
-      const stripeProductId = product.id;
-      this.serverless.service.provider.environment[productConfig.internal.id] = stripeProductId;
+
+      const prices = await this.getStripe().prices.list({
+        product: product.id,
+      });
+
+      const pricesForProduct: Stripe.Price[] = [];
+
+      for (const priceConfig of productConfig.prices) {
+        const existingPrice = this.findMatchingPrice(priceConfig, prices.data);
+        if (existingPrice) {
+          Logging.logInfo(`Price ${existingPrice.id} already exists`);
+          pricesForProduct.push(existingPrice);
+          this.serverless.service.provider.environment[priceConfig.id] =
+            existingPrice.id;
+          continue;
+        }
+        Logging.logInfo(`Creating price for ${product.id}`);
+
+        const price = await this.getStripe().prices.create({
+          product: product.id,
+          unit_amount: priceConfig.price,
+          currency: priceConfig.currency,
+          recurring: {
+            interval: priceConfig.interval,
+          },
+          metadata: {
+            stage: this.stage,
+            service: this.serverless.service.service,
+            managedBy: Globals.pluginName,
+            country: priceConfig.countryCode,
+          },
+        });
+        Logging.logInfo(`Created price ${price.id}`);
+        pricesForProduct.push(price);
+        this.serverless.service.provider.environment[priceConfig.id] = price.id;
+      }
+      this.stripeProducts.push({ product, prices: pricesForProduct });
+      this.serverless.service.provider.environment[productConfig.internal.id] =
+        product.id;
     }
   }
   private async createStripeWebhooks() {
@@ -387,4 +475,4 @@ class ServerlessCustomDomain {
   }
 }
 
-export = ServerlessCustomDomain;
+export = ServerlessStripe;
