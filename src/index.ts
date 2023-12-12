@@ -537,7 +537,8 @@ class ServerlessStripe {
           Description: `Webhook secret automatically created by ${Globals.pluginName}`,
           Value: webhook.secret,
           Type: "SecureString",
-          Tags: Object.entries(webhookParams.metadata).map(([Key, Value]) => ({ Key, Value }))
+          Tags: Object.entries(webhookParams.metadata).map(([Key, Value]) => ({ Key, Value })),
+          Overwrite: true,
         }))
         webhookSecretEnvVarValue = webhook.secret;
       }
