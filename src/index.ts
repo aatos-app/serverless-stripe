@@ -19,6 +19,11 @@ import {
   GetParameterCommand,
 } from "@aws-sdk/client-ssm";
 
+type DeletedWebhook = {
+  webhookId: string;
+  url: string;
+  lambda: string;
+};
 type MetadataBase = {
   stage: string;
   service: string;
@@ -31,6 +36,11 @@ type WebhookMetadata = {
 type ProductMetadata = {
   internalId: string;
 } & MetadataBase;
+
+type StripeProductEntry = {
+  product: Stripe.Product;
+  prices: Stripe.Price[];
+};
 
 class ServerlessStripe {
   // Serverless specific properties
@@ -46,17 +56,7 @@ class ServerlessStripe {
   public webhooks: WebhookConfig[];
   public products: StripeProductConfig[];
 
-  private webhooksCreated: Stripe.WebhookEndpoint[] = [];
-  private webhooksDeleted: {
-    webhookId: string;
-    url: string;
-    lambda: string;
-  }[] = [];
-
-  private stripeProducts: {
-    product: Stripe.Product;
-    prices: Stripe.Price[];
-  }[] = [];
+  private stripeProducts: StripeProductEntry[] = [];
 
   private customDomain: CustomDomain;
 
@@ -215,52 +215,6 @@ class ServerlessStripe {
     }
   }
 
-  public deploymentSummary() {
-    const TAB = "  ";
-    const NEWLINE = `\n${TAB}`;
-    const webhookListCreated = this.webhooksCreated.map((webhook) => {
-      const metadata = webhook.metadata || {};
-      return (
-        `CREATE${NEWLINE}` +
-        `webhookId:${NEWLINE}${TAB}${webhook.id}${NEWLINE}` +
-        `lambda:${NEWLINE}${TAB}${metadata.lambda}${NEWLINE}` +
-        `url:${NEWLINE}${TAB}${webhook.url}${NEWLINE}` +
-        `events:${NEWLINE}${TAB}${webhook.enabled_events.join(
-          `${NEWLINE}${TAB}`
-        )}${NEWLINE}`
-      );
-    });
-
-    const webhookListDeleted = this.webhooksDeleted.map((webhook) => {
-      return (
-        `DELETE${NEWLINE}` +
-        `webhookId:${NEWLINE}${TAB}${webhook.webhookId}${NEWLINE}` +
-        `lambda:${NEWLINE}${TAB}${webhook.lambda}${NEWLINE}` +
-        `url:${NEWLINE}${TAB}${webhook.url}${NEWLINE}`
-      );
-    });
-
-    const activeProducts = this.stripeProducts.map((productEntry) => {
-      return (
-        `PRODUCT${NEWLINE}` +
-        `productId:${NEWLINE}${TAB}${productEntry.product.id}${NEWLINE}` +
-        `name:${NEWLINE}${TAB}${productEntry.product.name}${NEWLINE}` +
-        `internalId:${NEWLINE}${TAB}${productEntry.product.metadata.internalId}${NEWLINE}` +
-        `prices:${NEWLINE}${TAB}${productEntry.prices
-          .map(
-            (price) =>
-              `${price.id}${NEWLINE}${TAB}${TAB}country:${price.metadata.country}${NEWLINE}${TAB}${TAB}price:${price.unit_amount}${NEWLINE}${TAB}${TAB}currency:${price.currency}${NEWLINE}${TAB}${TAB}interval:${price.recurring?.interval}`
-          )
-          .join(`${NEWLINE}${TAB}`)}`
-      );
-    });
-    Globals.serverless.addServiceOutputSection(Globals.pluginName, [
-      ...webhookListCreated,
-      ...webhookListDeleted,
-      ...activeProducts,
-    ]);
-  }
-
   private isStripeEntityManagedByThisStack(
     webhook: Pick<Stripe.WebhookEndpoint, "metadata">
   ): boolean {
@@ -289,43 +243,49 @@ class ServerlessStripe {
   public async removeStripeWebhooks() {
     const webhooksBefore = await this.getWebhooksFromStripe();
     Logging.logInfo(`Removing ${webhooksBefore.length} webhooks`);
+
     // delete webhooks that are not in config
+    const webhooksDeleted: DeletedWebhook[] = [];
     for (const webhook of webhooksBefore) {
       const deletedWebhook = await this.getStripe().webhookEndpoints.del(
         webhook.id
       );
       Logging.logInfo(`Deleted webhook ${webhook.id}`);
-      this.webhooksDeleted.push({
+      webhooksDeleted.push({
         webhookId: deletedWebhook.id,
         url: webhook.url,
         lambda: webhook.metadata.lambda,
       });
     }
 
-    this.deploymentSummary();
+    this.deploymentSummary([], webhooksDeleted);
   }
   public async removeWebhooksNotInConfig() {
-    const webhooksBefore = await this.getWebhooksFromStripe();
-    const webhooksNotFoundInConfig = webhooksBefore.filter(
-      (w) => !this.webhooksCreated.some((wc) => wc.id === w.id)
+    const allWebhooks = await this.getWebhooksFromStripe();
+    const activeWebhooks = allWebhooks.filter((w) => !w.metadata.toBeDeleted);
+
+    const webhooksMarkedForDeletion = allWebhooks.filter(
+      (w) => !activeWebhooks.some((wc) => wc.id === w.id)
     );
     Logging.logInfo(
-      `Found ${webhooksNotFoundInConfig.length} webhooks not in config`
+      `Found ${webhooksMarkedForDeletion.length} webhooks that are marked for deletion`
     );
+
     // delete webhooks that are not in config
-    for (const webhook of webhooksNotFoundInConfig) {
+    const webhooksDeleted: DeletedWebhook[] = [];
+    for (const webhook of webhooksMarkedForDeletion) {
       const deletedWebhook = await this.getStripe().webhookEndpoints.del(
         webhook.id
       );
       Logging.logInfo(`Deleted webhook ${webhook.id}`);
-      this.webhooksDeleted.push({
+      webhooksDeleted.push({
         webhookId: deletedWebhook.id,
         url: webhook.url,
         lambda: webhook.metadata.lambda,
       });
     }
 
-    this.deploymentSummary();
+    this.deploymentSummary(activeWebhooks, webhooksDeleted);
   }
 
   private getWebhookUrl(webhookFunction: WebhookFunction): string {
@@ -471,6 +431,9 @@ class ServerlessStripe {
 
   private async createStripeWebhooks() {
     const webhooksBefore = await this.getWebhooksFromStripe();
+
+    const webhooksCreatedOrUpdated: Stripe.WebhookEndpoint[] = [];
+
     for (const webhookConfig of this.webhooks) {
       const { functionName, events, webhookSecretEnvVariableName } =
         webhookConfig;
@@ -548,7 +511,7 @@ class ServerlessStripe {
         );
         webhookSecretEnvVarValue = webhook.secret;
       }
-      this.webhooksCreated.push(webhook);
+      webhooksCreatedOrUpdated.push(webhook);
 
       webhookFunction.environment = webhookFunction.environment || {};
       webhookFunction.environment[webhookSecretEnvVariableName] =
@@ -557,6 +520,74 @@ class ServerlessStripe {
         `Webhook secret: ${webhookSecretEnvVarValue} to ${functionName} varname ${webhookSecretEnvVariableName}`
       );
     }
+
+    const webhooksToBeDeleted = webhooksBefore.filter(
+      (w) => !webhooksCreatedOrUpdated.some((wc) => wc.id === w.id)
+    );
+    Logging.logInfo(
+      `Found ${webhooksToBeDeleted.length} webhooks not in config, marking them for deletion`
+    );
+    // mar webhooks that are not in config for deletion
+    // deletion happens after deploy
+    for (const webhook of webhooksToBeDeleted) {
+      await this.getStripe().webhookEndpoints.update(webhook.id, {
+        metadata: {
+          ...webhook.metadata,
+          toBeDeleted: "true",
+        },
+      });
+      Logging.logInfo(`Marked webhook ${webhook.id} for deletion`);
+    }
+  }
+
+  public deploymentSummary(
+    activeWebhooks: Stripe.WebhookEndpoint[],
+    webhooksDeleted: DeletedWebhook[]
+  ) {
+    const TAB = "  ";
+    const NEWLINE = `\n${TAB}`;
+    const webhookListCreated = activeWebhooks.map((webhook) => {
+      const metadata = webhook.metadata || {};
+      return (
+        `CREATE${NEWLINE}` +
+        `webhookId:${NEWLINE}${TAB}${webhook.id}${NEWLINE}` +
+        `lambda:${NEWLINE}${TAB}${metadata.lambda}${NEWLINE}` +
+        `url:${NEWLINE}${TAB}${webhook.url}${NEWLINE}` +
+        `events:${NEWLINE}${TAB}${webhook.enabled_events.join(
+          `${NEWLINE}${TAB}`
+        )}${NEWLINE}`
+      );
+    });
+
+    const webhookListDeleted = webhooksDeleted.map((webhook) => {
+      return (
+        `DELETE${NEWLINE}` +
+        `webhookId:${NEWLINE}${TAB}${webhook.webhookId}${NEWLINE}` +
+        `lambda:${NEWLINE}${TAB}${webhook.lambda}${NEWLINE}` +
+        `url:${NEWLINE}${TAB}${webhook.url}${NEWLINE}`
+      );
+    });
+
+    // NOTE these do not get currently get printed when functions are 1st packaged and then deployed separately
+    const activeProducts = this.stripeProducts.map((productEntry) => {
+      return (
+        `PRODUCT${NEWLINE}` +
+        `productId:${NEWLINE}${TAB}${productEntry.product.id}${NEWLINE}` +
+        `name:${NEWLINE}${TAB}${productEntry.product.name}${NEWLINE}` +
+        `internalId:${NEWLINE}${TAB}${productEntry.product.metadata.internalId}${NEWLINE}` +
+        `prices:${NEWLINE}${TAB}${productEntry.prices
+          .map(
+            (price) =>
+              `${price.id}${NEWLINE}${TAB}${TAB}country:${price.metadata.country}${NEWLINE}${TAB}${TAB}price:${price.unit_amount}${NEWLINE}${TAB}${TAB}currency:${price.currency}${NEWLINE}${TAB}${TAB}interval:${price.recurring?.interval}`
+          )
+          .join(`${NEWLINE}${TAB}`)}`
+      );
+    });
+    Globals.serverless.addServiceOutputSection(Globals.pluginName, [
+      ...webhookListCreated,
+      ...webhookListDeleted,
+      ...activeProducts,
+    ]);
   }
 }
 
