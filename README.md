@@ -6,7 +6,7 @@ This plugin is designed for the Serverless Framework. It automates the creation 
 
 1. Install and configure the `serverless-domain-manager` plugin.
 
-2. Generate a Stripe API key. You'll need permissions for managing webhooks, products and prices.
+2. Generate a Stripe API key. You'll need permissions for managing webhooks, products and prices. Also make sure you have aws rights to put and read aws ssm parameters
 
 3. Modify your serverless configuration as shown below:
     ```markdown

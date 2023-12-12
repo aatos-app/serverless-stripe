@@ -13,6 +13,7 @@ import {
 } from "./types";
 import Logging from "./logging";
 import { Stripe } from "stripe";
+import { SSMClient, PutParameterCommand, GetParameterCommand } from "@aws-sdk/client-ssm";
 
 type MetadataBase = {
   stage: string;
@@ -34,6 +35,7 @@ class ServerlessStripe {
   public commands: object;
   public hooks: object;
   public stage: string;
+  public region: string;
 
   // Stripe specific properties
   private _stripe: Stripe;
@@ -68,6 +70,7 @@ class ServerlessStripe {
     this.webhooks = this.serverless.service.custom.stripe.webhooks;
     this.products = this.serverless.service.custom.stripe.products ?? [];
     this.stage = this.serverless.processedInput.options.stage;
+    this.region = this.serverless.service.provider.region as string;
 
     this.hooks = {
       "before:package:initialize": this.hookWrapper.bind(
@@ -110,6 +113,12 @@ class ServerlessStripe {
     if (!this.stage) {
       throw new Error(`${Globals.pluginName}: Stage is required.`);
     }
+    if (!this.region) {
+      throw new Error(`${Globals.pluginName}: Region is required.`);
+    }
+    if (typeof this.region !== "string") {
+      throw new Error(`${Globals.pluginName}: Region must be a string.`);
+    }
     this.customDomain = this.serverless.service.custom.customDomain;
     if (!this.customDomain) {
       throw new Error(
@@ -146,6 +155,11 @@ class ServerlessStripe {
     const uniqueFunctionNames = [...new Set(functionNames)];
     if (functionNames.length !== uniqueFunctionNames.length) {
       throw new Error("Function names must be unique");
+    }
+
+    // verify getSsmParameterName does not throw error
+    for (const webhook of this.webhooks) {
+      this.getSsmParameterName(this.getWebhookMetadata(webhook.functionName));
     }
 
     for (const product of this.products) {
@@ -349,6 +363,8 @@ class ServerlessStripe {
     );
   }
 
+
+
   private async createStripeProducts() {
     if (this.products.length === 0) {
       return;
@@ -420,6 +436,37 @@ class ServerlessStripe {
         product.id;
     }
   }
+
+  private getSsmParameterName = (metadata: WebhookMetadata) =>{
+     const name = `stripe-webhook-secret-${metadata.service}-${metadata.stage}-${metadata.lambda}`;
+     // must match regex a-zA-Z0-9_.-
+      const regex = /^[a-zA-Z0-9_.-]+$/;
+      if (!regex.test(name)) {
+        throw new Error(
+          `Ssm parameter name ${name} does not match regex ${regex.toString()}`
+        );
+      }
+      // Max lengt 1011 characters
+      const maxTotalLength = 1011;
+      const prefixLength = 80; // approx i.e. arn:aws:ssm:us-east-2:111122223333:parameter/
+      const maxLength = maxTotalLength - prefixLength;
+      if (name.length > maxLength) {
+        throw new Error(
+          `Ssm parameter name ${name} is too long, max length is 1011 characters`
+        );
+      }
+      return name;
+    };
+
+    private getWebhookMetadata(functionName: string): WebhookMetadata {
+      return {
+        lambda: functionName,
+        stage: this.stage,
+        service: this.serverless.service.service,
+        managedBy: Globals.pluginName,
+      };
+    }
+
   private async createStripeWebhooks() {
     const webhooksBefore = await this.getWebhooksFromStripe();
     for (const webhookConfig of this.webhooks) {
@@ -447,30 +494,59 @@ class ServerlessStripe {
       const webhookParams = {
         url: webhookUrl,
         enabled_events: events,
-        metadata: {
-          lambda: functionName,
-          stage: this.stage,
-          service: this.serverless.service.service,
-          managedBy: Globals.pluginName,
-        } as WebhookMetadata,
+        metadata: this.getWebhookMetadata(functionName),
       };
 
-      if (!webhook) {
+      const client = new SSMClient({ region: this.region });
+      let createNewWebhook = !webhook;
+      let webhookSecretEnvVarValue: string;
+      if (!createNewWebhook) {
+        try {
+          const response = await client.send(new GetParameterCommand({
+            Name: this.getSsmParameterName(webhookParams.metadata),
+            WithDecryption: true
+          }))
+          webhookSecretEnvVarValue = response.Parameter?.Value;
+        } catch (e) {
+          if (e.name === "ParameterNotFound") {
+            createNewWebhook = true;
+          } else {
+            throw e;
+          }
+        }
+        if (!webhookSecretEnvVarValue) {
+          Logging.logWarning(`WARNING: Webhook secret not found for ${functionName} ${webhookParams.metadata.lambda}, creating webhook again.`);
+          createNewWebhook = true;
+        } else {
+          await this.getStripe().webhookEndpoints.update(
+            webhook.id,
+            webhookParams
+          );
+          Logging.logInfo(`Updated webhook ${webhook.id}`);
+        }
+
+      }
+      if (createNewWebhook) {
         webhook = await this.getStripe().webhookEndpoints.create(webhookParams);
         Logging.logInfo(`Created webhook ${webhook.id}`);
-      } else {
-        webhook = await this.getStripe().webhookEndpoints.update(
-          webhook.id,
-          webhookParams
-        );
-        Logging.logInfo(`Updated webhook ${webhook.id}`);
+        if (!webhook.secret) {
+          throw new Error(`Webhook ${webhook.id} secret is missing`);
+        }
+        await client.send(new PutParameterCommand({
+          Name: this.getSsmParameterName(webhookParams.metadata),
+          Description: `Webhook secret automatically created by ${Globals.pluginName}`,
+          Value: webhook.secret,
+          Type: "SecureString",
+          Tags: Object.entries(webhookParams.metadata).map(([Key, Value]) => ({ Key, Value }))
+        }))
+        webhookSecretEnvVarValue = webhook.secret;
       }
       this.webhooksCreated.push(webhook);
 
-      const webhookSecretEnvVarValue = webhook.secret;
       webhookFunction.environment = webhookFunction.environment || {};
       webhookFunction.environment[webhookSecretEnvVariableName] =
         webhookSecretEnvVarValue;
+      Logging.logInfo(`Webhook secret: ${webhookSecretEnvVarValue} to ${functionName} varname ${webhookSecretEnvVariableName}`);
     }
   }
 }
