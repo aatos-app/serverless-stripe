@@ -13,7 +13,11 @@ import {
 } from "./types";
 import Logging from "./logging";
 import { Stripe } from "stripe";
-import { SSMClient, PutParameterCommand, GetParameterCommand } from "@aws-sdk/client-ssm";
+import {
+  SSMClient,
+  PutParameterCommand,
+  GetParameterCommand,
+} from "@aws-sdk/client-ssm";
 
 type MetadataBase = {
   stage: string;
@@ -363,8 +367,6 @@ class ServerlessStripe {
     );
   }
 
-
-
   private async createStripeProducts() {
     if (this.products.length === 0) {
       return;
@@ -437,35 +439,35 @@ class ServerlessStripe {
     }
   }
 
-  private getSsmParameterName = (metadata: WebhookMetadata) =>{
-     const name = `stripe-webhook-secret-${metadata.service}-${metadata.stage}-${metadata.lambda}`;
-     // must match regex a-zA-Z0-9_.-
-      const regex = /^[a-zA-Z0-9_.-]+$/;
-      if (!regex.test(name)) {
-        throw new Error(
-          `Ssm parameter name ${name} does not match regex ${regex.toString()}`
-        );
-      }
-      // Max lengt 1011 characters
-      const maxTotalLength = 1011;
-      const prefixLength = 80; // approx i.e. arn:aws:ssm:us-east-2:111122223333:parameter/
-      const maxLength = maxTotalLength - prefixLength;
-      if (name.length > maxLength) {
-        throw new Error(
-          `Ssm parameter name ${name} is too long, max length is 1011 characters`
-        );
-      }
-      return name;
-    };
-
-    private getWebhookMetadata(functionName: string): WebhookMetadata {
-      return {
-        lambda: functionName,
-        stage: this.stage,
-        service: this.serverless.service.service,
-        managedBy: Globals.pluginName,
-      };
+  private getSsmParameterName = (metadata: WebhookMetadata) => {
+    const name = `stripe-webhook-secret-${metadata.service}-${metadata.stage}-${metadata.lambda}`;
+    // must match regex a-zA-Z0-9_.-
+    const regex = /^[a-zA-Z0-9_.-]+$/;
+    if (!regex.test(name)) {
+      throw new Error(
+        `Ssm parameter name ${name} does not match regex ${regex.toString()}`
+      );
     }
+    // Max lengt 1011 characters
+    const maxTotalLength = 1011;
+    const prefixLength = 80; // approx i.e. arn:aws:ssm:us-east-2:111122223333:parameter/
+    const maxLength = maxTotalLength - prefixLength;
+    if (name.length > maxLength) {
+      throw new Error(
+        `Ssm parameter name ${name} is too long, max length is 1011 characters`
+      );
+    }
+    return name;
+  };
+
+  private getWebhookMetadata(functionName: string): WebhookMetadata {
+    return {
+      lambda: functionName,
+      stage: this.stage,
+      service: this.serverless.service.service,
+      managedBy: Globals.pluginName,
+    };
+  }
 
   private async createStripeWebhooks() {
     const webhooksBefore = await this.getWebhooksFromStripe();
@@ -502,10 +504,12 @@ class ServerlessStripe {
       let webhookSecretEnvVarValue: string;
       if (!createNewWebhook) {
         try {
-          const response = await client.send(new GetParameterCommand({
-            Name: this.getSsmParameterName(webhookParams.metadata),
-            WithDecryption: true
-          }))
+          const response = await client.send(
+            new GetParameterCommand({
+              Name: this.getSsmParameterName(webhookParams.metadata),
+              WithDecryption: true,
+            })
+          );
           webhookSecretEnvVarValue = response.Parameter?.Value;
         } catch (e) {
           if (e.name === "ParameterNotFound") {
@@ -515,7 +519,9 @@ class ServerlessStripe {
           }
         }
         if (!webhookSecretEnvVarValue) {
-          Logging.logWarning(`WARNING: Webhook secret not found for ${functionName} ${webhookParams.metadata.lambda}, creating webhook again.`);
+          Logging.logWarning(
+            `WARNING: Webhook secret not found for ${functionName} ${webhookParams.metadata.lambda}, creating webhook again.`
+          );
           createNewWebhook = true;
         } else {
           await this.getStripe().webhookEndpoints.update(
@@ -524,7 +530,6 @@ class ServerlessStripe {
           );
           Logging.logInfo(`Updated webhook ${webhook.id}`);
         }
-
       }
       if (createNewWebhook) {
         webhook = await this.getStripe().webhookEndpoints.create(webhookParams);
@@ -532,14 +537,15 @@ class ServerlessStripe {
         if (!webhook.secret) {
           throw new Error(`Webhook ${webhook.id} secret is missing`);
         }
-        await client.send(new PutParameterCommand({
-          Name: this.getSsmParameterName(webhookParams.metadata),
-          Description: `Webhook secret automatically created by ${Globals.pluginName}`,
-          Value: webhook.secret,
-          Type: "SecureString",
-          Tags: Object.entries(webhookParams.metadata).map(([Key, Value]) => ({ Key, Value })),
-          Overwrite: true,
-        }))
+        await client.send(
+          new PutParameterCommand({
+            Name: this.getSsmParameterName(webhookParams.metadata),
+            Description: `Webhook secret automatically created by ${Globals.pluginName}`,
+            Value: webhook.secret,
+            Type: "SecureString",
+            Overwrite: true,
+          })
+        );
         webhookSecretEnvVarValue = webhook.secret;
       }
       this.webhooksCreated.push(webhook);
@@ -547,7 +553,9 @@ class ServerlessStripe {
       webhookFunction.environment = webhookFunction.environment || {};
       webhookFunction.environment[webhookSecretEnvVariableName] =
         webhookSecretEnvVarValue;
-      Logging.logInfo(`Webhook secret: ${webhookSecretEnvVarValue} to ${functionName} varname ${webhookSecretEnvVariableName}`);
+      Logging.logInfo(
+        `Webhook secret: ${webhookSecretEnvVarValue} to ${functionName} varname ${webhookSecretEnvVariableName}`
+      );
     }
   }
 }
