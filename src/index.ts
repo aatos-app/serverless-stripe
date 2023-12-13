@@ -199,9 +199,6 @@ class ServerlessStripe {
         if (!price.currency) {
           throw new Error("Price currency is required");
         }
-        if (!price.interval) {
-          throw new Error("Price interval is required");
-        }
         if (!price.countryCode) {
           throw new Error("Price countryCode is required");
         }
@@ -375,20 +372,24 @@ class ServerlessStripe {
         }
         Logging.logInfo(`Creating price for ${product.id}`);
 
-        const price = await this.getStripe().prices.create({
+        const priceParams: Stripe.PriceCreateParams = {
           product: product.id,
           unit_amount: priceConfig.price,
           currency: priceConfig.currency,
-          recurring: {
-            interval: priceConfig.interval,
-          },
+
           metadata: {
             stage: this.stage,
             service: this.serverless.service.service,
             managedBy: Globals.pluginName,
             country: priceConfig.countryCode,
           },
-        });
+        };
+        if (priceConfig.interval) {
+          priceParams["recurring"] = {
+            interval: priceConfig.interval,
+          };
+        }
+        const price = await this.getStripe().prices.create(priceParams);
         Logging.logInfo(`Created price ${price.id}`);
         pricesForProduct.push(price);
         this.serverless.service.provider.environment[priceConfig.id] = price.id;
