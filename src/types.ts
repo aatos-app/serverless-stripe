@@ -24,6 +24,12 @@ export interface StripeProductConfig {
   prices: StripePriceConfig[];
 }
 
+export type StripePortalConfig = {
+  configuration: Stripe.BillingPortal.ConfigurationCreateParams;
+  internalId: string;
+  envVariableName: string;
+}
+
 type Value<T> = T[keyof T];
 export type WebhookFunction = Value<AWS["functions"]>;
 
@@ -31,6 +37,7 @@ export interface StripeConfig {
   apiKey: string;
   webhooks: WebhookConfig[];
   products: StripeProductConfig[];
+  billingPortals: StripePortalConfig[];
 }
 
 export interface Tags {

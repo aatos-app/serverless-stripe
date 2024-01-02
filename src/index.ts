@@ -10,6 +10,7 @@ import {
   WebhookFunction,
   StripeProductConfig,
   StripePriceConfig,
+  StripePortalConfig,
 } from "./types";
 import Logging from "./logging";
 import { Stripe } from "stripe";
@@ -18,6 +19,8 @@ import {
   PutParameterCommand,
   GetParameterCommand,
 } from "@aws-sdk/client-ssm";
+import { getAllPortalsFromStripe } from "./billingPortal";
+import { getAllProductsFromStripe } from "./products";
 
 type DeletedWebhook = {
   webhookId: string;
@@ -55,6 +58,7 @@ class ServerlessStripe {
   private _stripe: Stripe;
   public webhooks: WebhookConfig[];
   public products: StripeProductConfig[];
+  public billingPortals: StripePortalConfig[];
 
   private stripeProducts: StripeProductEntry[] = [];
 
@@ -73,6 +77,7 @@ class ServerlessStripe {
     this.options = options;
     this.webhooks = this.serverless.service.custom.stripe.webhooks;
     this.products = this.serverless.service.custom.stripe.products ?? [];
+    this.billingPortals = this.serverless.service.custom.stripe.billingPortals ?? [];
     this.stage = this.serverless.processedInput.options.stage;
     this.region = this.serverless.service.provider.region as string;
 
@@ -123,6 +128,56 @@ class ServerlessStripe {
     if (typeof this.region !== "string") {
       throw new Error(`${Globals.pluginName}: Region must be a string.`);
     }
+
+    // Make sure customDomain configuration exists, stop if not
+    const config = this.serverless.service.custom;
+    const stripeExists = config && typeof config.stripe !== "undefined";
+    if (typeof config === "undefined" || !stripeExists) {
+      throw new Error(
+        `${Globals.pluginName}: Plugin configuration is missing.`
+      );
+    }
+
+    this.validateWebhookConfigs();
+    this.validateProductAndPriceConfigs();
+    this.validatePortalConfigs();
+  }
+
+  private validatePortalConfigs() {
+    for (const portal of this.billingPortals) {
+      if (!portal.envVariableName) {
+        throw new Error("Portal envVariableName is required");
+      }
+      if (!portal.configuration) {
+        throw new Error("Portal configuration is required");
+      }
+      if (!portal.internalId) {
+        throw new Error("Portal internalId is required");
+      }
+      // env var must match regex [a-zA-Z]([a-zA-Z0-9_])+]
+      const regex = /^[a-zA-Z]([a-zA-Z0-9_])+$/;
+      if (!regex.test(portal.envVariableName)) {
+        throw new Error(
+          `Portal envVariableName ${
+            portal.envVariableName
+          } does not match regex ${regex.toString()}`
+        );
+      }
+    }
+    const portalIds = this.billingPortals.map((portal) => portal.internalId);
+    const uniquePortalIds = [...new Set(portalIds)];
+    if (portalIds.length !== uniquePortalIds.length) {
+      throw new Error("Portal ids must be unique");
+    }
+    const envVars = this.billingPortals.map((portal) => portal.envVariableName);
+    const uniqueEnvVars = [...new Set(envVars)];
+    if (envVars.length !== uniqueEnvVars.length) {
+      throw new Error("Portal envVariableNames must be unique");
+    }
+  }
+
+
+  private validateWebhookConfigs() {
     this.customDomain = this.serverless.service.custom.customDomain;
     if (!this.customDomain) {
       throw new Error(
@@ -141,14 +196,6 @@ class ServerlessStripe {
         `${Globals.pluginName}: 'basePath' is required in 'customDomain' config`
       );
     }
-    // Make sure customDomain configuration exists, stop if not
-    const config = this.serverless.service.custom;
-    const stripeExists = config && typeof config.stripe !== "undefined";
-    if (typeof config === "undefined" || !stripeExists) {
-      throw new Error(
-        `${Globals.pluginName}: Plugin configuration is missing.`
-      );
-    }
 
     if (!this.webhooks) {
       throw new Error("Stripe webhooks not found");
@@ -165,7 +212,9 @@ class ServerlessStripe {
     for (const webhook of this.webhooks) {
       this.getSsmParameterName(this.getWebhookMetadata(webhook.functionName));
     }
+  }
 
+  private validateProductAndPriceConfigs() {
     for (const product of this.products) {
       if (!product.name) {
         throw new Error("Product name is required");
@@ -225,39 +274,24 @@ class ServerlessStripe {
 
   private async getWebhooksFromStripe(): Promise<Stripe.WebhookEndpoint[]> {
     const webhooks = await this.getStripe().webhookEndpoints.list();
-    return webhooks.data.filter((hook) =>
-      this.isStripeEntityManagedByThisStack(hook)
+    return webhooks.data.filter((i) =>
+      this.isStripeEntityManagedByThisStack(i)
     );
   }
 
   private async getProductsFromStripe(): Promise<Stripe.Product[]> {
     const stripe = this.getStripe();
+    const products = await getAllProductsFromStripe(stripe);
+    return products.filter((i) => this.isStripeEntityManagedByThisStack(i));
+  }
 
-    const getAllProducts = async (
-      starting_after?: string,
-      products: Stripe.Product[] = []
-    ): Promise<Stripe.Product[]> => {
-      const productResponse = await stripe.products.list({
-        limit: 100, // adjust this number based on how many records you want to fetch per request
-        starting_after,
-      });
-
-      const allProducts = [...products, ...productResponse.data];
-
-      if (productResponse.has_more) {
-        // Get the last product in the list
-        const lastProduct =
-          productResponse.data[productResponse.data.length - 1];
-        // Recursively fetch more products
-        return await getAllProducts(lastProduct.id, allProducts);
-      }
-
-      return allProducts;
-    };
-
-    const products = await getAllProducts();
-    return products.filter((product) =>
-      this.isStripeEntityManagedByThisStack(product)
+  private async getPortalsFromStripe(): Promise<
+    Stripe.BillingPortal.Configuration[]
+  > {
+    const stripe = this.getStripe();
+    const portalConfigurations = await getAllPortalsFromStripe(stripe);
+    return portalConfigurations.filter((i) =>
+      this.isStripeEntityManagedByThisStack(i)
     );
   }
 
@@ -328,6 +362,7 @@ class ServerlessStripe {
   }
 
   public async createStripeWebhooksAndProducts() {
+    await this.createStripeCustomerPortals();
     await this.createStripeWebhooks();
     await this.createStripeProducts();
   }
@@ -422,6 +457,45 @@ class ServerlessStripe {
       this.stripeProducts.push({ product, prices: pricesForProduct });
       this.serverless.service.provider.environment[productConfig.internal.id] =
         product.id;
+    }
+  }
+
+  private async createStripeCustomerPortals() {
+    const portalsBefore = await this.getPortalsFromStripe();
+    const stripe = this.getStripe();
+
+    for (const portalConfigs of this.billingPortals) {
+      const internalId = portalConfigs.internalId;
+      let portal = portalsBefore.find(
+        (portal) => portal.metadata.internalId === internalId
+      );
+
+      const configuration: Stripe.BillingPortal.ConfigurationCreateParams &
+        Stripe.BillingPortal.ConfigurationUpdateParams = {
+        ...portalConfigs.configuration,
+        metadata: {
+          stage: this.stage,
+          service: this.serverless.service.service,
+          managedBy: Globals.pluginName,
+          internalId,
+        },
+      };
+      if (portal) {
+        Logging.logInfo(`Customer portal ${portal.id} already exists`);
+        await stripe.billingPortal.configurations.update(
+          portal.id,
+          configuration
+        );
+      } else {
+        portal = await stripe.billingPortal.configurations.create(
+          configuration
+        );
+        Logging.logInfo(`Created customer portal ${portal.id}`);
+      }
+      this.serverless.service.provider.environment[portalConfigs.envVariableName] = portal.id;
+      Logging.logInfo(
+        `Customer portal ${portal.id} env var ${portalConfigs.envVariableName} created`
+      );
     }
   }
 

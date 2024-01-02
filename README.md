@@ -40,6 +40,13 @@ This plugin is designed for the Serverless Framework. It automates the creation 
               ],
             },
           ],
+          billingPortals: [
+            {
+              configuration: {...}, //Stripe.BillingPortal.ConfigurationCreateParams
+              internalId: 'portal2',
+              envVariableName: 'customerSupportPortalId',
+            },
+          ],
         },
         domain: {
           // Please note these are serverless-domain-manager configurations but they're also used in this plugin
