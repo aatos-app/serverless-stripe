@@ -33,12 +33,15 @@ export type StripePortalConfig = {
 type Value<T> = T[keyof T];
 export type WebhookFunction = Value<AWS["functions"]>;
 
-export interface StripeConfig {
+export type  SingleStripeConfig  = {
+  accountId: string;
   apiKey: string;
   webhooks: WebhookConfig[];
   products: StripeProductConfig[];
   billingPortals: StripePortalConfig[];
 }
+export type  StripeConfig  = SingleStripeConfig[]
+
 
 export interface Tags {
   [key: string]: string;

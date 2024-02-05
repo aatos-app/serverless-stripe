@@ -6,48 +6,51 @@ This plugin is designed for the Serverless Framework. It automates the creation 
 
 1. Install and configure the `serverless-domain-manager` plugin.
 
-2. Generate a Stripe API key. You'll need permissions for managing webhooks, products and prices. Also make sure you have aws rights to put and read aws ssm parameters
+2. Generate a Stripe API key. You'll need permissions for managing webhooks, products, customer portal and prices. Also make sure you have aws rights to put and read aws ssm parameters
 
 3. Modify your serverless configuration as shown below:
     ```markdown
       custom: {
-        stripe: {
-          apiKey: 'my-stripe-api-key',
-          webhooks: [
-            {
-              functionName: 'webhookHandler',
-              events: [
-                'invoice.payment_succeeded',
-              ],
-              webhookSecretEnvVariableName: 'stripeWebhookSecret',
-            },
-          ],
-          products: [
-            {
-              name: 'Subscription',
-              internal: {
-                id: 'subscription',
-                description: 'Subscription product',
+        stripe: [
+          {
+            accountId: 'Default',
+            apiKey: 'my-stripe-api-key',
+            webhooks: [
+              {
+                functionName: 'webhookHandler',
+                events: [
+                  'invoice.payment_succeeded',
+                ],
+                webhookSecretEnvVariableName: 'stripeWebhookSecret',
               },
-              prices: [
-                {
-                  id: 'price_sweden',
-                  price: 9900,
-                  currency: 'sek',
-                  interval: 'year',
-                  countryCode: 'SE',
+            ],
+            products: [
+              {
+                name: 'Subscription',
+                internal: {
+                  id: 'subscription',
+                  description: 'Subscription product',
                 },
-              ],
-            },
-          ],
-          billingPortals: [
-            {
-              configuration: {...}, //Stripe.BillingPortal.ConfigurationCreateParams
-              internalId: 'portal2',
-              envVariableName: 'customerSupportPortalId',
-            },
-          ],
-        },
+                prices: [
+                  {
+                    id: 'price_sweden',
+                    price: 9900,
+                    currency: 'sek',
+                    interval: 'year',
+                    countryCode: 'SE',
+                  },
+                ],
+              },
+            ],
+            billingPortals: [
+              {
+                configuration: {...}, //Stripe.BillingPortal.ConfigurationCreateParams
+                internalId: 'portal2',
+                envVariableName: 'customerSupportPortalId',
+              },
+            ],
+          }
+        ],
         domain: {
           // Please note these are serverless-domain-manager configurations but they're also used in this plugin
           domainName: "mydomain.com",
