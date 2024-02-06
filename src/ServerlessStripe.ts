@@ -484,7 +484,7 @@ export class ServerlessStripe {
   }
 
   private getSsmParameterName = (metadata: WebhookMetadata) => {
-    const name = `stripe-webhook-secret-${metadata.service}-${metadata.stage}-${metadata.lambda}`;
+    const name = `stripe-webhook-secret-${this.accountId}-${metadata.service}-${metadata.stage}-${metadata.lambda}`;
     // must match regex a-zA-Z0-9_.-
     const regex = /^[a-zA-Z0-9_.-]+$/;
     if (!regex.test(name)) {
